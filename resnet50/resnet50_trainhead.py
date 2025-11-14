@@ -10,7 +10,6 @@ from PIL import Image
 import os
 import zipfile
 import urllib.request
-from tqdm import tqdm
 
 # Set random seeds for reproducibility
 np.random.seed(42)
@@ -79,7 +78,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     correct = 0
     total = 0
 
-    for inputs, labels in tqdm(dataloader, desc="Training"):
+    for inputs, labels in dataloader:
         inputs, labels = inputs.to(device), labels.to(device)
 
         optimizer.zero_grad()
@@ -106,7 +105,7 @@ def evaluate(model, dataloader, criterion, device):
     total = 0
 
     with torch.no_grad():
-        for inputs, labels in tqdm(dataloader, desc="Evaluating"):
+        for inputs, labels in dataloader:
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -121,7 +120,7 @@ def evaluate(model, dataloader, criterion, device):
     return epoch_loss, epoch_acc
 
 
-def train_model(model, train_loader, val_loader, num_epochs=10, lr=0.001):
+def train_model(model, train_loader, val_loader, device, num_epochs=10, lr=0.001):
     """
     Train and evaluate a model.
 
@@ -138,8 +137,7 @@ def train_model(model, train_loader, val_loader, num_epochs=10, lr=0.001):
     current_path = os.path.abspath('.')
     print('currentpath', current_path)
 
-    #best_val_loss = float('inf')
-    best_val_loss = 2.00
+    best_val_loss = float('inf')
     for epoch in range(num_epochs):
         print(f'\nEpoch {epoch+1}/{num_epochs}')
         print('-' * 30)
@@ -157,7 +155,7 @@ def train_model(model, train_loader, val_loader, num_epochs=10, lr=0.001):
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), f'./resnet50_finetuned_plantCLEF.pth')
+            torch.save(model.state_dict(), f'./resnet50_trainhead_plantCLEF.pth')
             print(f"\nBest model parameters updated at epoch {epoch+1}!")
 
         scheduler.step()
