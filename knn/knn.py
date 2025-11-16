@@ -13,10 +13,14 @@ from collections import defaultdict
 from sklearn.metrics import silhouette_score
 import csv
 from pathlib import Path
+import argparse
 
 from matplotlib import pyplot as plt
 import random
 from PIL import Image
+
+assert "PLANT_HOME" in os.environ, f"Please set home/root directory of PlantCLEF files to the environment variable PLANT_HOME. (globus share in scratch)"
+PLANT_HOME = os.getenv("PLANT_HOME")
 
 def tile_image_nxn(img, tiles_per_side=3, target_size=518):
     w, h = img.size
@@ -139,9 +143,22 @@ def write_submission(pred_dict, out_csv="submission.csv"):
             writer.writerow([quad, s])
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tiles_per_side", type=int, default=3, help="Number of tiles per side.")
+    parser.add_argument("--neighbors", type=int, default=5, help="Number of neighbors to consider in KNN.")
+    parser.add_argument("--votes", type=int, default=1, help="Number of votes to consider in voting for quadrat prediction.")
+    parser.add_argument("--subset", type=bool, default=False, help="Use a subset of the training data.")
+    parser.add_argument("--n_samples", type=int, default=640, help="Number of samples to use in the subset.")
+    args = parser.parse_args()
+
+
     # Config Settings
-    TILES_PER_SIDE = 3
-    SUBSET = True
+    TILES_PER_SIDE = args.tiles_per_side
+    SUBSET = args.subset
+    N_SAMPLES = args.n_samples # only if SUBSET = True
+    NEIGHBORS = args.neighbors
+    VOTES = args.votes
 
     transform = transforms.Compose([
         transforms.Resize((518,518)),
@@ -153,10 +170,10 @@ if __name__ == "__main__":
     ])
 
 
-    train_dataset = datasets.ImageFolder("/scratch/jme3qd/data/plantclef2025/images_max_side_800", transform=transform)
+    train_dataset = datasets.ImageFolder(os.path.join(PLANT_HOME, "images_max_side_800"), transform=transform)
 
     if SUBSET:
-        n_samples = 640
+        n_samples = N_SAMPLES
         indices = np.random.choice(len(train_dataset), n_samples, replace=False)
         train_dataset = Subset(train_dataset, indices)
         class_to_speciesid = {class_idx: int(folder_name) for folder_name, class_idx in train_dataset.dataset.class_to_idx.items()}
@@ -166,7 +183,7 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False, num_workers=4)
 
 
-    quadrat_path = "/scratch/jme3qd/data/plantclef2025/data/PlantCLEF/PlantCLEF2025/DataOut/test/package/images"
+    quadrat_path = os.path.join(PLANT_HOME, "data/PlantCLEF/PlantCLEF2025/DataOut/test/package/images")
 
     quadrat_loader = DataLoader(
         QuadratNxNDataset(
@@ -184,7 +201,7 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = timm.create_model("timm/vit_base_patch14_reg4_dinov2.lvd142m", pretrained=True)
     #model = timm.create_model("vit_base_patch16_224", pretrained=True)
-    checkpoint_path = '/home/jme3qd/Downloads/model_best.pth.tar'
+    checkpoint_path = os.path.join(PLANT_HOME, "dinov2_model/model_best.pth.tar")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False) # Load to CPU first
 
     if 'state_dict' in checkpoint:
@@ -199,7 +216,7 @@ if __name__ == "__main__":
     for p in model.parameters():
         p.requires_grad = False
 
-    train_file = "train_embs.npz"
+    train_file = os.path.join(PLANT_HOME,"knn/embeddings/train_embs.npz")
     if os.path.exists(train_file):
         with np.load(train_file) as data:
             train_embs = data['embs']
@@ -211,7 +228,7 @@ if __name__ == "__main__":
 
 
 
-    filename = "quadrat_embs_"+str(TILES_PER_SIDE)+"x"+str(TILES_PER_SIDE)+".npz"
+    filename = os.path.join(PLANT_HOME, "knn/embeddings/quadrat_embs_"+str(TILES_PER_SIDE)+"x"+str(TILES_PER_SIDE)+".npz")
     if os.path.exists(filename):
         with np.load(filename) as data:
             quadrat_embs = data['embs']
@@ -231,8 +248,8 @@ if __name__ == "__main__":
 
 
     # Tile-level predictions
-    tile_preds = knn_predict(quadrat_embs, k=5)
+    tile_preds = knn_predict(quadrat_embs, k=NEIGHBORS)
     # Quadrat-level species predictions
-    quadrat_preds = aggregate_predictions(tile_preds, quadrat_paths, tiles_per_quadrat=TILES_PER_SIDE*TILES_PER_SIDE)
+    quadrat_preds = aggregate_predictions(tile_preds, quadrat_paths, tiles_per_quadrat=TILES_PER_SIDE*TILES_PER_SIDE, min_votes=VOTES)
     # Write CSV
-    write_submission(quadrat_preds, "submission_"+str(TILES_PER_SIDE)+"x"+str(TILES_PER_SIDE)+".csv")
+    write_submission(quadrat_preds, os.join.path(PLANT_HOME,"/submissions/knn_submission_"+str(TILES_PER_SIDE)+"x"+str(TILES_PER_SIDE)+"_v"+str(VOTES)+"_n"+str(NEIGHBORS)+".csv"))
