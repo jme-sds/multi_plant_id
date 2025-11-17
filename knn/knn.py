@@ -252,4 +252,4 @@ if __name__ == "__main__":
     # Quadrat-level species predictions
     quadrat_preds = aggregate_predictions(tile_preds, quadrat_paths, tiles_per_quadrat=TILES_PER_SIDE*TILES_PER_SIDE, min_votes=VOTES)
     # Write CSV
-    write_submission(quadrat_preds, os.join.path(PLANT_HOME,"/submissions/knn_submission_"+str(TILES_PER_SIDE)+"x"+str(TILES_PER_SIDE)+"_v"+str(VOTES)+"_n"+str(NEIGHBORS)+".csv"))
+    write_submission(quadrat_preds,out_csv= os.path.join(PLANT_HOME,"submissions/knn_submission_"+str(TILES_PER_SIDE)+"x"+str(TILES_PER_SIDE)+"_v"+str(VOTES)+"_n"+str(NEIGHBORS)+".csv"))
