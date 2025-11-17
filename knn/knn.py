@@ -113,7 +113,7 @@ def extract_unlabeled_embeddings(dataloader, model, device):
 
     return np.concatenate(all_embs), all_paths
 
-def knn_predict(embs, k=5):
+def knn_predict(embs, index, k=5):
     distances, indices = index.search(embs.astype("float32"), k)
     # Convert indices → species IDs
     preds = np.array([[faiss_labels[i] for i in row] for row in indices])
@@ -135,6 +135,7 @@ def aggregate_predictions(tile_preds, tile_paths, tiles_per_quadrat=9, min_votes
     return quadrat_to_species
 
 def write_submission(pred_dict, out_csv="submission.csv"):
+    print("Writing submission to {}".format(out_csv))
     with open(out_csv, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["quadrat_id", "species_ids"])
@@ -238,17 +239,21 @@ if __name__ == "__main__":
         quadrat_embs, quadrat_paths = extract_unlabeled_embeddings(quadrat_loader, model, device)
         np.savez(filename, embs=quadrat_embs, paths=quadrat_paths)
 
+    res = faiss.StandardGpuResources()
+    device_id = 0
+
     faiss.normalize_L2(quadrat_embs)
     faiss.normalize_L2(train_embs)
     index = faiss.IndexFlatIP(train_embs.shape[1])
-    index.add(train_embs)
+    gpu_index = faiss.index_cpu_to_gpu(res, device_id, index)
+    gpu_index.add(train_embs)
     #D, I = index.search(quadrat_embs, k=5)
     faiss_labels = train_labels
 
 
 
     # Tile-level predictions
-    tile_preds = knn_predict(quadrat_embs, k=NEIGHBORS)
+    tile_preds = knn_predict(quadrat_embs, index = gpu_index, k=NEIGHBORS)
     # Quadrat-level species predictions
     quadrat_preds = aggregate_predictions(tile_preds, quadrat_paths, tiles_per_quadrat=TILES_PER_SIDE*TILES_PER_SIDE, min_votes=VOTES)
     # Write CSV
