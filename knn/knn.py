@@ -1,5 +1,7 @@
 import os
 import sys
+from torch.utils.data import DataLoader, Dataset
+
 project_root = os.path.abspath('..')
 
 if project_root not in sys.path:
@@ -10,7 +12,6 @@ from loading.quadrat import QuadratTilingDataset_Inference
 
 import torch
 from torchvision import transforms, datasets
-from torch.utils.data import DataLoader, Dataset
 import timm
 import numpy as np
 import pandas as pd
@@ -31,52 +32,6 @@ from PIL import Image
 
 assert "PLANT_HOME" in os.environ, f"Please set home/root directory of PlantCLEF files to the environment variable PLANT_HOME. (globus share in scratch)"
 PLANT_HOME = os.getenv("PLANT_HOME")
-
-def tile_image_nxn(img, tiles_per_side=3, target_size=518):
-    w, h = img.size
-
-    tile_w = w / tiles_per_side
-    tile_h = h / tiles_per_side
-
-    tiles = []
-
-    for row in range(tiles_per_side):
-        for col in range(tiles_per_side):
-            left = int(col * tile_w)
-            top = int(row * tile_h)
-            right = int((col + 1) * tile_w)
-            bottom = int((row + 1) * tile_h)
-
-            tile = img.crop((left, top, right, bottom))
-            tile = tile.resize((target_size, target_size), Image.BICUBIC)
-            tiles.append(tile)
-
-    return tiles
-
-class QuadratNxNDataset(Dataset):
-    def __init__(self, root, transform, tiles_per_side=3, target_size=518):
-        self.paths = sorted([str(p) for p in Path(root).glob("*.*")])
-        self.transform = transform
-        self.tiles_per_side = tiles_per_side
-        self.target_size = target_size
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, idx):
-        path = self.paths[idx]
-        img = Image.open(path).convert("RGB")
-
-        tiles = tile_image_nxn(
-            img,
-            tiles_per_side=self.tiles_per_side,
-            target_size=self.target_size
-        )
-
-        tiles = [self.transform(t) for t in tiles]
-        tiles = torch.stack(tiles)  # shape [N*N, 3, 518, 518]
-
-        return tiles, path
 
 def load_model(device):
     model = timm.create_model("timm/vit_base_patch14_reg4_dinov2.lvd142m", pretrained=True)
@@ -125,9 +80,12 @@ def extract_unlabeled_embeddings(dataloader, model, device):
 
             # Flatten tiles:
             # imgs: (B, T, C, H, W) → (B*T, C, H, W)
-            B, T, C, H, W = imgs.shape
-            imgs = imgs.view(B * T, C, H, W).to(device)
+            T = TILES_PER_SIDE**2
+#            B, T, C, H, W = imgs.shape
+#            imgs = imgs.view(B * T, C, H, W).to(device)
 
+            B, C, H, W = imgs.shape
+            imgs = imgs.view(B, C, H, W).to(device)
             feats = model.forward_features(imgs)
             cls_embs = feats[:, 0, :] if feats.ndim == 3 else feats
 
@@ -239,11 +197,7 @@ if __name__ == "__main__":
                             std=[0.229, 0.224, 0.225])
     ])
 
-#    train_dataset = datasets.ImageFolder(os.path.join(PLANT_HOME, "images_max_side_800"), transform=transform)
-
 #    class_to_speciesid = {class_idx: int(folder_name) for folder_name, class_idx in train_dataset.class_to_idx.items()}
-
-#    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False, num_workers=4)
 
     DATA_DIR = os.path.join(PLANT_HOME,"images_max_side_800")
 
@@ -261,17 +215,7 @@ if __name__ == "__main__":
 
     QUADRAT_DIR = os.path.join(PLANT_HOME, "data/PlantCLEF/PlantCLEF2025/DataOut/test/package/images")
 
-#    quadrat_loader = DataLoader(
-#        QuadratNxNDataset(
-#            quadrat_path,
-#            transform,
-#            tiles_per_side=TILES_PER_SIDE,
-#            target_size=518
-#        ),
-#        batch_size=1,
-#        shuffle=False,
-#        num_workers=4
-#    )
+
     quadrat_test_set = QuadratTilingDataset_Inference(
         data_dir=QUADRAT_DIR,
         grid_size=(TILES_PER_SIDE, TILES_PER_SIDE),
@@ -286,7 +230,7 @@ if __name__ == "__main__":
         dataset=quadrat_test_set,
         batch_size=32, # Batch size of 32 *tiles*
         shuffle=False, 
-        num_workers=4,
+        num_workers=1,
         pin_memory=True
     )
 
@@ -313,6 +257,7 @@ if __name__ == "__main__":
             quadrat_paths = data['paths']
             print("Quadrat embeddings loaded from", filename)
     else:
+        print(filename, " not found. Extracting embeddings...")
         quadrat_embs, quadrat_paths = extract_unlabeled_embeddings(quadrat_loader, model, device)
         np.savez(filename, embs=quadrat_embs, paths=quadrat_paths)
 
