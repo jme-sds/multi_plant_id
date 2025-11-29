@@ -1,10 +1,19 @@
+import os
+import sys
+project_root = os.path.abspath('..')
+
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+from loading.data_loader import SinglePlantDataLoader
+from loading.quadrat import QuadratTilingDataset_Inference
+
 import torch
 from torchvision import transforms, datasets
 from torch.utils.data import DataLoader, Dataset
 import timm
 import numpy as np
 import pandas as pd
-import os
 import faiss
 from tqdm import tqdm
 from collections import Counter
@@ -18,6 +27,7 @@ import argparse
 from matplotlib import pyplot as plt
 import random
 from PIL import Image
+
 
 assert "PLANT_HOME" in os.environ, f"Please set home/root directory of PlantCLEF files to the environment variable PLANT_HOME. (globus share in scratch)"
 PLANT_HOME = os.getenv("PLANT_HOME")
@@ -68,6 +78,24 @@ class QuadratNxNDataset(Dataset):
 
         return tiles, path
 
+def load_model(device):
+    model = timm.create_model("timm/vit_base_patch14_reg4_dinov2.lvd142m", pretrained=True)
+    #model = timm.create_model("vit_base_patch16_224", pretrained=True)
+    checkpoint_path = os.path.join(PLANT_HOME, "dinov2_model/model_best.pth.tar")
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False) # Load to CPU first
+
+    if 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    else:
+        state_dict = checkpoint # Assume the checkpoint itself is the state_dict
+
+    # 3. Load the state dictionary into the model
+    model.load_state_dict(state_dict,strict=False)
+
+    model.eval().to(device)
+    for p in model.parameters():
+        p.requires_grad = False
+    return model
 
 def extract_embeddings(dataloader, dataset,model, device):
     all_embs, all_labels = [], []
@@ -113,7 +141,36 @@ def extract_unlabeled_embeddings(dataloader, model, device):
 
     return np.concatenate(all_embs), all_paths
 
-def knn_predict(embs, index, k=5):
+def build_faiss_index(embs, device):
+    # Build index
+    faiss_file = os.path.join(PLANT_HOME, "knn/faiss_index/faiss.idx")
+    if os.path.exists(faiss_file):  # if index exists, load and use GPU if available
+        index = faiss.read_index(faiss_file)
+        print("Loaded FAISS index from {}".format(faiss_file))
+        if torch.cuda.is_available():
+            res = faiss.StandardGpuResources()
+            device_id = 0
+            gpu_index = faiss.index_cpu_to_gpu(res, device_id, index)
+            return gpu_index
+        else:
+            return index
+    else:   # if index does not exist, build and save for later use, optionally use GPU if available
+        index = faiss.IndexFlatIP(embs.shape[1])
+        if torch.cuda.is_available():
+            res = faiss.StandardGpuResources()
+            device_id = 0
+            gpu_index = faiss.index_cpu_to_gpu(res, device_id, index)
+            gpu_index.add(embs.astype("float32"))
+            faiss.write_index(faiss.index_gpu_to_cpu(gpu_index), faiss_file)
+            print("Saved FAISS index to {}".format(faiss_file))
+            return gpu_index
+        else:
+            index.add(embs.astype("float32"))
+            faiss.write_index(index, faiss_file)
+            print("Saved FAISS index to {}".format(faiss_file))
+            return index
+
+def knn_predict(embs, index, faiss_labels, k=5):
     distances, indices = index.search(embs.astype("float32"), k)
     # Convert indices → species IDs
     preds = np.array([[faiss_labels[i] for i in row] for row in indices])
@@ -161,61 +218,81 @@ if __name__ == "__main__":
     NEIGHBORS = args.neighbors
     VOTES = args.votes
 
-    transform = transforms.Compose([
-        transforms.Resize((518,518)),
+    RESIZE_SIZE = 256
+    IMG_SIZE = 518 
+    BATCH_SIZE = 32
+    NUM_WORKERS = os.cpu_count() # Use all available CPU cores for loading
+
+#    transform = transforms.Compose([
+#        transforms.Resize((518,518)),
+#        transforms.ToTensor(),
+#        transforms.Normalize(
+#            mean=(0.485, 0.456, 0.406),
+#            std=(0.229, 0.224, 0.225)
+#        )
+#    ])
+
+    inference_transform = transforms.Compose([
+        transforms.Resize((IMG_SIZE, IMG_SIZE)), # Crucial
         transforms.ToTensor(),
-        transforms.Normalize(
-            mean=(0.485, 0.456, 0.406),
-            std=(0.229, 0.224, 0.225)
-        )
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225])
     ])
 
+#    train_dataset = datasets.ImageFolder(os.path.join(PLANT_HOME, "images_max_side_800"), transform=transform)
 
-    train_dataset = datasets.ImageFolder(os.path.join(PLANT_HOME, "images_max_side_800"), transform=transform)
+#    class_to_speciesid = {class_idx: int(folder_name) for folder_name, class_idx in train_dataset.class_to_idx.items()}
 
-    if SUBSET:
-        n_samples = N_SAMPLES
-        indices = np.random.choice(len(train_dataset), n_samples, replace=False)
-        train_dataset = Subset(train_dataset, indices)
-        class_to_speciesid = {class_idx: int(folder_name) for folder_name, class_idx in train_dataset.dataset.class_to_idx.items()}
-    else:
-        class_to_speciesid = {class_idx: int(folder_name) for folder_name, class_idx in train_dataset.class_to_idx.items()}
+#    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False, num_workers=4)
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False, num_workers=4)
+    DATA_DIR = os.path.join(PLANT_HOME,"images_max_side_800")
 
-
-    quadrat_path = os.path.join(PLANT_HOME, "data/PlantCLEF/PlantCLEF2025/DataOut/test/package/images")
-
-    quadrat_loader = DataLoader(
-        QuadratNxNDataset(
-            quadrat_path,
-            transform,
-            tiles_per_side=TILES_PER_SIDE,
-            target_size=518
-        ),
-        batch_size=1,
-        shuffle=False,
-        num_workers=4
+    data_splitter = SinglePlantDataLoader(
+        data_dir=DATA_DIR,
+        resize_size=RESIZE_SIZE,
+        img_size=IMG_SIZE,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS
     )
 
+    # Get the dataloaders
+    train_loader, val_loader, test_loader = data_splitter.get_dataloaders()
+
+
+    QUADRAT_DIR = os.path.join(PLANT_HOME, "data/PlantCLEF/PlantCLEF2025/DataOut/test/package/images")
+
+#    quadrat_loader = DataLoader(
+#        QuadratNxNDataset(
+#            quadrat_path,
+#            transform,
+#            tiles_per_side=TILES_PER_SIDE,
+#            target_size=518
+#        ),
+#        batch_size=1,
+#        shuffle=False,
+#        num_workers=4
+#    )
+    quadrat_test_set = QuadratTilingDataset_Inference(
+        data_dir=QUADRAT_DIR,
+        grid_size=(TILES_PER_SIDE, TILES_PER_SIDE),
+        transform=inference_transform
+    )
+
+    assert len(quadrat_test_set) != 0, "Dataset is empty. Exiting."
+
+    # 3. Instantiate the DataLoader
+    # shuffle=False is critical for inference to keep tiles in order
+    quadrat_loader = DataLoader(
+        dataset=quadrat_test_set,
+        batch_size=32, # Batch size of 32 *tiles*
+        shuffle=False, 
+        num_workers=4,
+        pin_memory=True
+    )
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = timm.create_model("timm/vit_base_patch14_reg4_dinov2.lvd142m", pretrained=True)
-    #model = timm.create_model("vit_base_patch16_224", pretrained=True)
-    checkpoint_path = os.path.join(PLANT_HOME, "dinov2_model/model_best.pth.tar")
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False) # Load to CPU first
 
-    if 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
-    else:
-        state_dict = checkpoint # Assume the checkpoint itself is the state_dict
-
-    # 3. Load the state dictionary into the model
-    model.load_state_dict(state_dict,strict=False)
-
-    model.eval().to(device)
-    for p in model.parameters():
-        p.requires_grad = False
+    model = load_model(device)
 
     train_file = os.path.join(PLANT_HOME,"knn/embeddings/train_embs.npz")
     if os.path.exists(train_file):
@@ -239,21 +316,14 @@ if __name__ == "__main__":
         quadrat_embs, quadrat_paths = extract_unlabeled_embeddings(quadrat_loader, model, device)
         np.savez(filename, embs=quadrat_embs, paths=quadrat_paths)
 
-    res = faiss.StandardGpuResources()
-    device_id = 0
 
     faiss.normalize_L2(quadrat_embs)
     faiss.normalize_L2(train_embs)
-    index = faiss.IndexFlatIP(train_embs.shape[1])
-    gpu_index = faiss.index_cpu_to_gpu(res, device_id, index)
-    gpu_index.add(train_embs)
-    #D, I = index.search(quadrat_embs, k=5)
-    faiss_labels = train_labels
 
-
+    index = build_faiss_index(train_embs, device)
 
     # Tile-level predictions
-    tile_preds = knn_predict(quadrat_embs, index = gpu_index, k=NEIGHBORS)
+    tile_preds = knn_predict(quadrat_embs, index = index, faiss_labels=train_labels, k=NEIGHBORS)
     # Quadrat-level species predictions
     quadrat_preds = aggregate_predictions(tile_preds, quadrat_paths, tiles_per_quadrat=TILES_PER_SIDE*TILES_PER_SIDE, min_votes=VOTES)
     # Write CSV
