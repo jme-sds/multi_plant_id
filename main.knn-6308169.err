@@ -1,0 +1,4 @@
+/home/ezq9qu/.local/lib/python3.11/site-packages/torch/utils/data/dataloader.py:627: UserWarning: This DataLoader will create 4 worker processes in total. Our suggested max number of worker in current system is 2, which is smaller than what this DataLoader is going to create. Please be aware that excessive worker creation might get DataLoader running slow or even freeze, lower the worker number to avoid potential slowness/freeze if necessary.
+  warnings.warn(
+/var/spool/slurm/slurmd/job6308169/slurm_script: line 20: 374427 Killed                  python main.py --quadrat_dir /scratch/ezq9qu/quadrat/images --single_plant_dir /scratch/ezq9qu/images_max_side_800
+[2025-11-30T11:53:00.473] error: Detected 1 oom_kill event in StepId=6308169.batch. Some of the step tasks have been OOM Killed.

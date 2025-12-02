@@ -1,0 +1,4 @@
+usage: main.py [-h] [--backbone {resnet50,dinov2}] --quadrat_dir QUADRAT_DIR
+               --single_plant_dir SINGLE_PLANT_DIR [--grids GRIDS [GRIDS ...]]
+               [--neighbors NEIGHBORS] [--votes VOTES]
+main.py: error: argument --grids: invalid int value: '[7,8,9]'

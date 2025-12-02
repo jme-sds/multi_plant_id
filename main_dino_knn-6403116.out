@@ -1,0 +1,5 @@
+Job ID: 6403116
+Running on node: udc-ba06-35
+Using Python: /scratch/ezq9qu/llm_course/bin/python
+DEBUG: PLANT_HOME is configured as: '/scratch/ezq9qu'
+WARNING: 'peft' library not found. LoRA training will not work. (pip install peft)

@@ -33,6 +33,8 @@ from PIL import Image
 assert "PLANT_HOME" in os.environ, f"Please set home/root directory of PlantCLEF files to the environment variable PLANT_HOME. (globus share in scratch)"
 PLANT_HOME = os.getenv("PLANT_HOME")
 
+class_to_speciesid = {} 
+
 def load_model(device):
     model = timm.create_model("timm/vit_base_patch14_reg4_dinov2.lvd142m", pretrained=True)
     #model = timm.create_model("vit_base_patch16_224", pretrained=True)
@@ -52,50 +54,54 @@ def load_model(device):
         p.requires_grad = False
     return model
 
-def extract_embeddings(dataloader, dataset,model, device):
+def extract_embeddings(dataloader, dataset, model, device):
     all_embs, all_labels = [], []
     with torch.no_grad():
-        for imgs, idx in tqdm(dataloader):
+        for imgs, idx in tqdm(dataloader, desc="Extracting Train Embeddings"):
             imgs = imgs.to(device)
             feats = model.forward_features(imgs)
+            
+            # Handle different model outputs (ViT vs ResNet)
             if feats.ndim == 3:
-                cls_embs = feats[:, 0, :]  # [CLS] token
+                cls_embs = feats[:, 0, :]  # [CLS] token for ViT
             else:
-                cls_embs = feats
+                cls_embs = feats  # Already pooled for ResNetWrapper
 
+            # Map class index to true species ID using the injected global dictionary
             true_ids = [class_to_speciesid[int(c)] for c in idx]
 
             all_embs.append(cls_embs.cpu().numpy())
             all_labels.append(true_ids)
+            
     return np.concatenate(all_embs), np.concatenate(all_labels)
 
 def extract_unlabeled_embeddings(dataloader, model, device):
+    """
+    Extracts embeddings for unlabeled tiles.
+    The dataloader is expected to return (tile_image, image_path_string).
+    """
     all_embs, all_paths = [], []
 
     with torch.no_grad():
-        for batch in tqdm(dataloader):
+        for batch in tqdm(dataloader, desc="Extracting Quadrat Embeddings"):
+            imgs = batch[0].to(device)
+            paths = batch[1] # Tuple/List of path strings
 
-            imgs = batch[0]      # shape (B, T, 3, 518, 518)
-            paths = batch[1]     # list of length B
-
-            # Flatten tiles:
-            # imgs: (B, T, C, H, W) → (B*T, C, H, W)
-            T = TILES_PER_SIDE**2
-#            B, T, C, H, W = imgs.shape
-#            imgs = imgs.view(B * T, C, H, W).to(device)
-
-            B, C, H, W = imgs.shape
-            imgs = imgs.view(B, C, H, W).to(device)
+            # Note: The dataloader already returns a batch of individual TILES.
+            # Shape is (BatchSize, 3, H, W). We do NOT need to flatten or tile dimensions.
+            
             feats = model.forward_features(imgs)
-            cls_embs = feats[:, 0, :] if feats.ndim == 3 else feats
+            
+            # Handle different model outputs
+            if feats.ndim == 3:
+                cls_embs = feats[:, 0, :]  # [CLS] token for ViT
+            else:
+                cls_embs = feats # Already pooled for ResNetWrapper
 
-            # Save embeddings
             all_embs.append(cls_embs.cpu().numpy())
-
-            # Save one path for every tile
-            # If image X has 25 tiles → repeat the path 25 times
-            for p in paths:
-                all_paths.extend([p] * T)
+            
+            # Store the path for each tile (1-to-1 mapping)
+            all_paths.extend(paths)
 
     return np.concatenate(all_embs), all_paths
 

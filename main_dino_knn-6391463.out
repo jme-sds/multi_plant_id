@@ -1,0 +1,45 @@
+Job ID: 6391463
+Running on node: udc-an25-20
+Using Python: /scratch/ezq9qu/llm_course/bin/python
+Using device: cuda
+Grid Strategy: [7, 8, 9] (pooling votes)
+Loading model: dinov2...
+Loading local DINOv2 checkpoint from /scratch/ezq9qu/dinov2_model/model_best.pth.tar
+
+--- Setting up Memory Bank (Single Plants) ---
+Loading data from: /scratch/ezq9qu/images_max_side_800
+
+Splitting dataset
+
+Found 1408033 total images belonging to 7806 classes.
+Loading cached training embeddings from /scratch/ezq9qu/knn/embeddings/train_embs_dinov2.npz
+Normalizing and building Index...
+Found existing FAISS index at /scratch/ezq9qu/knn/faiss_index/faiss.idx
+Index dimension matches. Loading...
+
+--- Processing Grid Size: 7x7 ---
+Initializing inference dataset for a 7x7 grid.
+Found 2105 images, creating 103145 total tiles.
+Loading cached embeddings: /scratch/ezq9qu/knn/embeddings/quadrat_embs_dinov2_7x7.npz
+Running KNN...
+
+--- Processing Grid Size: 8x8 ---
+Initializing inference dataset for a 8x8 grid.
+Found 2105 images, creating 134720 total tiles.
+Loading cached embeddings: /scratch/ezq9qu/knn/embeddings/quadrat_embs_dinov2_8x8.npz
+Running KNN...
+
+--- Processing Grid Size: 9x9 ---
+Initializing inference dataset for a 9x9 grid.
+Found 2105 images, creating 170505 total tiles.
+Loading cached embeddings: /scratch/ezq9qu/knn/embeddings/quadrat_embs_dinov2_9x9.npz
+Running KNN...
+
+Pooling votes from all grids...
+  Processing grid pass 1/3 (103145 tiles)...
+  Processing grid pass 2/3 (134720 tiles)...
+  Processing grid pass 3/3 (170505 tiles)...
+  Aggregating votes for 2105 unique quadrats...
+Writing submission to /scratch/ezq9qu/submissions/submission_dinov2_pooled_7_8_9.csv
+
+Done! Pooled submission saved to: /scratch/ezq9qu/submissions/submission_dinov2_pooled_7_8_9.csv
