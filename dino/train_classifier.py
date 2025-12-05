@@ -15,7 +15,8 @@ import random
 # Paths
 PLANT_HOME = "/scratch/jme3qd/data/plantclef2025" # Base directory for models
 MODEL_CHECKPOINT = "timm/vit_base_patch14_reg4_dinov2.lvd142m"
-BACKBONE_PATH = os.path.join(PLANT_HOME, "dinov2_model/model_best.pth.tar")
+#BACKBONE_PATH = os.path.join(PLANT_HOME, "dinov2_model/model_best.pth.tar")
+BACKBONE_PATH = "baseline_fine_tuned.pth"
 LUCAS_PATH = os.path.join(PLANT_HOME, "lucas") # Folder containing unlabelled .jpg images
 PLANTCLEF_PATH = os.path.join(PLANT_HOME, "images_max_side_800") # Folder with subfolders for each species
 TEST_IMAGES_PATH = os.path.join(PLANT_HOME,"quadrat/images")
@@ -215,7 +216,7 @@ def main():
     else:
         state_dict = model.state_dict()
         
-    torch.save(state_dict, "baseline_fine_tuned.pth")
+    torch.save(state_dict, "baseline_fine_tuned_30epoch.pth")
     print("Saved to baseline_fine_tuned.pth")
 
 if __name__ == "__main__":

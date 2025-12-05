@@ -19,26 +19,26 @@ PLANT_HOME = "/scratch/jme3qd/data/plantclef2025" # Base directory for models
 
 TEST_IMAGES_PATH = os.path.join(PLANT_HOME,"quadrat/images") #"./data/plantclef2025_test_quadrats" 
 CLASS_LIST_DIR = os.path.join(PLANT_HOME,"images_max_side_800") # "./data/plantclef_single_images" # Needed to map index -> species ID
-PLANT_HOME = "./data" # Directory containing dinov2_model/model_best.pth.tar
+#PLANT_HOME = "./data" # Directory containing dinov2_model/model_best.pth.tar
 
 # Model Config
 MODEL_CHECKPOINT = "timm/vit_base_patch14_reg4_dinov2.lvd142m"
 IMAGE_SIZE = 518
-GRID_SIZE = (3, 3) # Rows, Cols
+GRID_SIZE = (4, 4) # Rows, Cols
 
 # Hardware Config
 # A6000 has 48GB VRAM. We can push batch size.
 # DINOv2-Base (518px) takes roughly 1.5GB-2GB per sample in training, less in inference.
 # Safe start: 32 per GPU * 4 GPUs = 128.
 BATCH_SIZE = 512 
-NUM_WORKERS = 1 # High worker count for fast IO on 4 GPUs
+NUM_WORKERS = 16 # High worker count for fast IO on 4 GPUs
 
 # Checkpoint to load
 # Option A: The raw backbone from organizers (Classifier head will be random!)
-#BACKBONE_PATH = os.path.join(PLANT_HOME, "dinov2_model/model_best.pth.tar")
-BACKBONE_PATH = "./baseline_fine_tuned.pth"
+BACKBONE_PATH = os.path.join(PLANT_HOME, "dinov2_model/model_best.pth.tar")
+#BACKBONE_PATH = "./baseline_fine_tuned.pth"
 # Option B: Your fine-tuned model (uncomment and set path if you have one)
-# TRAINED_MODEL_PATH = "./final_model_baseline.pth" 
+TRAINED_MODEL_PATH = "./baseline_fine_tuned.pth" 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 NUM_GPUS = torch.cuda.device_count()
@@ -186,10 +186,10 @@ def load_model(num_classes):
     
     # 3. (Optional) Load Full Fine-Tuned Model
     # If you have a trained .pth file, uncomment the lines below:
-    # if 'TRAINED_MODEL_PATH' in globals() and os.path.exists(TRAINED_MODEL_PATH):
-    #     print(f"Loading fine-tuned state from {TRAINED_MODEL_PATH}")
-    #     state = torch.load(TRAINED_MODEL_PATH, map_location="cpu")
-    #     model.load_state_dict(state)
+    if 'TRAINED_MODEL_PATH' in globals() and os.path.exists(TRAINED_MODEL_PATH):
+        print(f"Loading fine-tuned state from {TRAINED_MODEL_PATH}")
+        state = torch.load(TRAINED_MODEL_PATH, map_location="cpu")
+        model.load_state_dict(state)
     
     model.to(DEVICE)
     model.eval()
