@@ -198,7 +198,7 @@ def main():
     CLASSES_DIR = os.path.join(PLANT_HOME, args.classes_dir)
     TEST_DIR = os.path.join(PLANT_HOME, args.test_dir)
     BACKBONE_FILE = os.path.join(PLANT_HOME, args.backbone_path)
-    FINE_TUNED_FILE = os.path.join(PLANT_HOME, args.fine_tuned_path)
+    FINE_TUNED_FILE = os.path.join(PLANT_HOME, "dinov2_model/tuned_models", args.fine_tuned_path)
     
     IMAGE_SIZE = 518
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
