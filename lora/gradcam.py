@@ -7,27 +7,14 @@ import timm
 from peft import PeftModel, LoraConfig, get_peft_model
 import numpy as np
 import cv2
+import csv
+import random
+import glob
+import argparse
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-#IMAGE_PATH = "/scratch/jme3qd/data/plantclef2025/quadrat/images/2024-CEV3-20240602.jpg" # Path to the specific image you want to visualize
-IMAGE_PATH = "/scratch/jme3qd/data/plantclef2025/quadrat/images/CBN-can-A6-20230705.jpg" # Path to the specific image you want to visualize
-#IMAGE_PATH = "/scratch/jme3qd/data/plantclef2025/images_max_side_800/1355868/0070793945bc6db2c597387006c5425751204baa.jpg"
-OUTPUT_PATH = "./gradcam_quadrat.jpg"
-MODEL_TYPE = "baseline" # "lora" or "baseline"
-MODEL_CHECKPOINT = "timm/vit_base_patch14_reg4_dinov2.lvd142m"
-CLASS_LIST_DIR = "/scratch/jme3qd/data/plantclef2025/images_max_side_800" # Directory to read class names from
-GRID_SIZE = (3, 3)
-IMAGE_SIZE = 518
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-NUM_CLASSES = 7806 # Update to match your training
-WEIGHTS_PATH = "./lora_lucas_ssl_weights" # <--- POINT THIS TO YOUR TRAINED WEIGHTS FOLDER/FILE
-PLANT_HOME = "/scratch/jme3qd/data/plantclef2025"
-BACKBONE_PATH = "../dino/baseline_fine_tuned.pth"
 
-# New Configuration Options
-SINGLE_PLANT_MODE = False # Set to True for single plant images (disable tiling)
+PLANT_HOME = os.getenv("PLANT_HOME")
+assert PLANT_HOME is not None, "Please set home/root directory of PlantCLEF files to the environment variable PLANT_HOME."
 
 # ==========================================
 # GRADCAM CLASS
@@ -38,78 +25,90 @@ class ViTGradCAM:
         self.model = model
         self.gradients = None
         self.activations = None
+        self.target_layer = None
         
-        # Determine target layer (Last block of the ViT backbone)
-        if hasattr(model.backbone, "base_model") and hasattr(model.backbone.base_model, "blocks"):
-            self.target_layer = model.backbone.base_model.blocks[-1]
-            self.norm_layer = model.backbone.base_model.norm
-        elif hasattr(model.backbone, "blocks"):
-            self.target_layer = model.backbone.blocks[-1]
-            self.norm_layer = model.backbone.norm
-        else:
-            raise ValueError("Could not find blocks in model backbone")
+        # Recursively search for the last 'blocks' attribute in the backbone
+        candidates = [model]
+        if hasattr(model, 'backbone'): candidates.append(model.backbone)
+        if hasattr(model.backbone, 'base_model'): candidates.append(model.backbone.base_model)
+        if hasattr(model.backbone, 'base_model') and hasattr(model.backbone.base_model, 'model'): candidates.append(model.backbone.base_model.model)
+        
+        for candidate in candidates:
+            if hasattr(candidate, 'blocks'):
+                # CRITICAL CHANGE: Hook 'norm1' inside the last block
+                # Hooking the block output yields zero gradients for patches because
+                # the classifier only uses the CLS token (index 0) from the block output.
+                # Hooking norm1 (input to Attention) captures the gradients BEFORE 
+                # they are mixed into the CLS token via Attention.
+                self.target_layer = candidate.blocks[-1].norm1
+                break
+        
+        if self.target_layer is None:
+            raise ValueError("Could not find 'blocks[-1].norm1' in model hierarchy. Check model structure.")
+        
+        print(f"Hooked target layer: {self.target_layer}")
 
-        # Register Forward Hook
         self.target_layer.register_forward_hook(self.save_activation_and_hook_grad)
 
     def save_activation_and_hook_grad(self, module, input, output):
-        # Save activation
         self.activations = output
-        # Register a hook on the tensor itself to catch gradients during backward
         output.register_hook(self.save_gradient)
 
     def save_gradient(self, grad):
         self.gradients = grad
 
     def generate_cam(self, input_tensor, target_class_idx):
-        # 1. Zero grads
         self.model.zero_grad()
         
-        # 2. Forward Pass
         output = self.model(input_tensor)
         score = output[0, target_class_idx]
-        
-        # 3. Backward Pass
         score.backward()
         
-        # 4. Get Data
         grads = self.gradients
         acts = self.activations
         
-        # Debugging: Check if signals are flowing
         if grads is None or acts is None:
-            print("Error: No gradients captured. Check if model requires_grad=True for head.")
-            return np.zeros((14, 14)) # Dummy return
+            print("Error: No gradients captured.")
+            return np.zeros((14, 14)) 
 
-        # 5. Handle Tokens
+        # Handle Tokens
         num_patches = (IMAGE_SIZE // 14) ** 2
         offset = acts.shape[1] - num_patches
         
-        # Extract patch tokens
         grads = grads[:, offset:, :]
         acts = acts[:, offset:, :]
         
-        # 6. Compute Weights (Global Average Pooling of Gradients)
         weights = torch.mean(grads, dim=1, keepdim=True) 
-        
-        # 7. Weighted Combination
         cam = torch.sum(weights * acts, dim=2) 
         
-        # 8. Reshape to Grid
         grid_dim = int(np.sqrt(num_patches))
         cam = cam.reshape(1, grid_dim, grid_dim)
         
-        # 9. ReLU and Normalize
         cam = torch.relu(cam)
         cam = cam.detach().cpu().numpy()[0]
+        cam = np.nan_to_num(cam)
         
-        # Avoid division by zero
+        # Debug: Print raw range to ensure gradients are flowing
+        raw_max = np.max(cam)
+        if raw_max == 0:
+            print(f"DEBUG: Zero gradients for class {target_class_idx}. Check model/weights.")
+        
+        # Contrast Stretching (Clip outliers)
+        percentile_99 = np.percentile(cam, 99)
+        percentile_1 = np.percentile(cam, 1)
+        cam = np.clip(cam, percentile_1, percentile_99)
+        
+        # Normalize 0-1
         max_val = np.max(cam)
         min_val = np.min(cam)
+        
         if max_val - min_val > 1e-7:
             cam = (cam - min_val) / (max_val - min_val)
         else:
-            cam = np.zeros_like(cam) # Flat heatmap
+            cam = np.zeros_like(cam) 
+        
+        # Contrast Boost
+        cam = np.power(cam, 2) 
             
         return cam
 
@@ -117,39 +116,19 @@ class ViTGradCAM:
 # MODEL DEFINITIONS
 # ==========================================
 
-class SimpleClassifier(nn.Module):
-    def __init__(self, backbone, n_classes):
-        super().__init__()
-        self.backbone = backbone
-        # Dynamic dim check
-        if hasattr(backbone, "base_model") and hasattr(backbone.base_model, "model"):
-             dim = backbone.base_model.model.embed_dim
-        elif hasattr(backbone, "embed_dim"):
-             dim = backbone.embed_dim
-        else:
-             dim = backbone.num_features
-        self.classifier = nn.Linear(dim, n_classes)
-    
-    def forward(self, x):
-        features = self.backbone.forward_features(x)
-        cls_token = features[:, 0]
-        logits = self.classifier(cls_token)
-        return logits
-
 class LoRAClassifier(nn.Module):
     def __init__(self, backbone, n_classes):
         super().__init__()
         self.backbone = backbone
         if hasattr(backbone, "base_model") and hasattr(backbone.base_model, "model"):
              dim = backbone.base_model.model.embed_dim
-        else:
+        elif hasattr(backbone, "embed_dim"):
              dim = backbone.embed_dim
+        else:
+             dim = 768 
         self.classifier = nn.Linear(dim, n_classes)
     
     def forward(self, x):
-        # Note: We must ensure PEFT forwards properly.
-        # Direct call to forward_features might bypass PEFT logic if not careful.
-        # But for DINOv2 PEFT usually wraps correctly.
         features = self.backbone.forward_features(x)
         cls_token = features[:, 0]
         logits = self.classifier(cls_token)
@@ -159,51 +138,66 @@ class LoRAClassifier(nn.Module):
 # UTILITIES
 # ==========================================
 
+def load_species_map(csv_path):
+    mapping = {}
+    if not os.path.exists(csv_path):
+        print(f"Warning: Species map CSV not found at {csv_path}. Using IDs.")
+        return mapping
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                sid = row.get("species_id", "").strip()
+                name = row.get("species", "").strip()
+                if sid and name:
+                    mapping[sid] = name
+        print(f"Loaded {len(mapping)} species names.")
+    except Exception as e:
+        print(f"Error reading species CSV: {e}")
+    return mapping
+
 def load_class_names(root_dir):
     if os.path.exists(root_dir):
         return sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
     return [f"Species_{i}" for i in range(NUM_CLASSES)]
 
+def get_random_image(directory):
+    if not os.path.exists(directory):
+        raise FileNotFoundError(f"Quadrat directory not found: {directory}")
+    files = glob.glob(os.path.join(directory, "*.jpg")) + glob.glob(os.path.join(directory, "*.jpeg"))
+    if not files:
+        raise FileNotFoundError(f"No jpg images found in {directory}")
+    choice = random.choice(files)
+    print(f"Selected random image: {choice}")
+    return choice
+
 def load_model(device, num_classes):
     print(f"Loading {MODEL_TYPE} model...")
     base_model = timm.create_model(MODEL_CHECKPOINT, pretrained=True)
     
-    # --- Custom Checkpoint Loading (Challenge Organizers) ---
-    if os.path.exists(BACKBONE_PATH):
-        print(f"Loading weights from {BACKBONE_PATH}")
-        checkpoint = torch.load(BACKBONE_PATH, map_location=device, weights_only=False) 
-        if 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
-        else:
-            state_dict = checkpoint
-        base_model.load_state_dict(state_dict, strict=False)
+    config = LoraConfig(
+        r=16,
+        lora_alpha=16,
+        target_modules=["qkv"],
+        lora_dropout=0.1,
+        bias="none",
+    )
+    base_model = get_peft_model(base_model, config)
+    model = LoRAClassifier(base_model, num_classes)
+    
+    if os.path.exists(FINE_TUNED_MODEL_PATH):
+        print(f"Loading full model state from {FINE_TUNED_MODEL_PATH}")
+        full_state = torch.load(FINE_TUNED_MODEL_PATH, map_location=device)
+        keys = model.load_state_dict(full_state, strict=False)
+        print(f"Weights loaded. Missing: {len(keys.missing_keys)}, Unexpected: {len(keys.unexpected_keys)}")
     else:
-        print(f"Checkpoint not found at {checkpoint_path}, using downloaded pretrained weights.")
-    # -----------------------------------------------------
+        print(f"WARNING: Fine-tuned model not found at {FINE_TUNED_MODEL_PATH}")
 
-    if MODEL_TYPE == "lora":
-        config = LoraConfig(r=16, lora_alpha=16, target_modules=["qkv"], lora_dropout=0.1, bias="none")
-        base_model = get_peft_model(base_model, config)
-        
-        # Load LoRA Weights
-        if os.path.exists(WEIGHTS_PATH):
-            print(f"Loading LoRA weights from {WEIGHTS_PATH}...")
-            base_model = PeftModel.from_pretrained(base_model, WEIGHTS_PATH)
-        else:
-             print(f"WARNING: LoRA weights not found at {WEIGHTS_PATH}. Predictions will be random!")
-
-        model = LoRAClassifier(base_model, num_classes)
-        
-        # Important: The Linear Head is NOT saved in the LoRA adapters folder by default.
-        # It's usually saved separately or in a full state_dict.
-        # You need to load your classifier head weights here if they aren't in the PEFT folder.
-        # Example:
-        # full_state = torch.load("final_model_state.pth")
-        # model.load_state_dict(full_state)
-        
-    else:
-        model = SimpleClassifier(base_model, num_classes)
-        # model.load_state_dict(torch.load("path_to_baseline_checkpoint.pth"))
+    # CRITICAL FIX FOR GRADCAM: Unfreeze parameters
+    # Even though we are in eval mode, we need PyTorch to track gradients
+    # through the backbone to the input image for GradCAM to work.
+    for param in model.parameters():
+        param.requires_grad = True
 
     model.to(device)
     model.eval() 
@@ -213,37 +207,49 @@ def get_transforms():
     return transforms.Compose([
         transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) 
     ])
 
 # ==========================================
 # VISUALIZATION
 # ==========================================
 
-def apply_heatmap(image_pil, cam_mask):
+def apply_heatmap_standard(image_pil, cam_mask):
+    """
+    Standard Heatmap Overlay (Jet Colormap)
+    Guarantees visibility by blending 50/50 with original image.
+    """
     w, h = image_pil.size
-    cam_mask = cv2.resize(cam_mask, (w, h))
-    heatmap = cv2.applyColorMap(np.uint8(255 * cam_mask), cv2.COLORMAP_JET)
-    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-    heatmap_pil = Image.fromarray(heatmap)
+    
+    # 1. Resize mask
+    cam_mask_resized = cv2.resize(cam_mask, (w, h))
+    
+    # 2. Colorize (Blue=Low, Red=High)
+    heatmap_bgr = cv2.applyColorMap(np.uint8(255 * cam_mask_resized), cv2.COLORMAP_JET)
+    heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+    heatmap_pil = Image.fromarray(heatmap_rgb)
+    
+    # 3. Blend 50% opacity
     result = Image.blend(image_pil.convert("RGB"), heatmap_pil, alpha=0.5)
     return result
 
-def visualize_gradcam(image_path, model, class_names, device):
-    if not os.path.exists(image_path):
-        print("Image not found.")
-        return
+def visualize_gradcam(image_path, model, class_ids, species_map, device):
+    if image_path is None:
+        try:
+            image_path = get_random_image(QUADRAT_DIR)
+        except Exception as e:
+            print(e)
+            return
 
     gradcam = ViTGradCAM(model)
     original_img = Image.open(image_path).convert("RGB")
     final_canvas = original_img.copy()
-    draw = ImageDraw.Draw(final_canvas)
     
     try:
         font = ImageFont.truetype("arial.ttf", 40)
     except:
         font = ImageFont.load_default()
 
-    # Determine processing mode
     if SINGLE_PLANT_MODE:
         print("Running in SINGLE PLANT MODE (No Tiling)...")
         rows, cols = 1, 1
@@ -257,7 +263,7 @@ def visualize_gradcam(image_path, model, class_names, device):
     
     transform = get_transforms()
     
-    print("Generating GradCAM...")
+    print(f"Generating GradCAM for {image_path}...")
     
     for row in range(rows):
         for col in range(cols):
@@ -273,22 +279,24 @@ def visualize_gradcam(image_path, model, class_names, device):
             output = model(input_tensor)
             probs = torch.nn.functional.softmax(output, dim=1)
             conf, pred_idx = torch.max(probs, dim=1)
-            class_id = pred_idx.item()
+            class_idx = pred_idx.item()
             
-            # Safety check for random models
-            if conf.item() < 0.01:
-                print(f"Warning: Low confidence ({conf.item():.4f}) on tile {row},{col}. Weights might be random.")
-
-            class_name = class_names[class_id]
+            species_id = class_ids[class_idx] 
+            display_name = species_map.get(str(species_id), species_id) 
             
-            cam_map = gradcam.generate_cam(input_tensor, class_id)
-            heatmap_tile = apply_heatmap(tile, cam_map)
+            cam_map = gradcam.generate_cam(input_tensor, class_idx)
+            
+            # Use Standard Overlay (Guaranteed visibility)
+            heatmap_tile = apply_heatmap_standard(tile, cam_map)
             final_canvas.paste(heatmap_tile, (left, top))
             
             draw = ImageDraw.Draw(final_canvas) 
             draw.rectangle([left, top, right, bottom], outline="white", width=3)
             
-            label_text = f"{class_name}\n{conf.item():.2f}"
+            if len(display_name) > 25:
+                display_name = display_name[:22] + "..."
+                
+            label_text = f"{display_name}\n{conf.item():.2f}"
             text_pos = (left + 10, top + 10)
             bbox = draw.textbbox(text_pos, label_text, font=font)
             draw.rectangle(bbox, fill="black")
@@ -297,7 +305,43 @@ def visualize_gradcam(image_path, model, class_names, device):
     final_canvas.save(OUTPUT_PATH)
     print(f"GradCAM visualization saved to {OUTPUT_PATH}")
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="GradCAM Visualization")
+    parser.add_argument("--image_path", type=str, default=None, help="Path to the image for GradCAM visualization")
+    parser.add_argument("--output_path", type=str, default="./gradcam.jpg", help="Path to save the GradCAM visualization")
+    parser.add_argument("--grid_size", type=int, nargs=2, default=(3, 3), help="Grid size for GradCAM visualization")
+    parser.add_argument("--single_plant_mode",type=bool, default=False, help="Run in SINGLE PLANT MODE (No Tiling)")
+    return parser
+
+def main():
+    args = parse_args().parse_args()
+    global OUTPUT_PATH, MODEL_TYPE, MODEL_CHECKPOINT, QUADRAT_DIR, SPECIES_MAP_FILE, CLASS_LIST_DIR, FINE_TUNED_MODEL_PATH, GRID_SIZE, IMAGE_SIZE, DEVICE, NUM_CLASSES, SINGLE_PLANT_MODE
+
+    IMAGE_PATH = args.image_path
+    # IMAGE_PATH = "/scratch/jme3qd/data/plantclef2025/quadrat/images/CBN-can-A6-20230705.jpg" 
+
+    OUTPUT_PATH = args.output_path
+
+    MODEL_TYPE = "lora" 
+    MODEL_CHECKPOINT = "timm/vit_base_patch14_reg4_dinov2.lvd142m"
+    #PLANT_HOME = "/scratch/jme3qd/data/plantclef2025"
+
+    QUADRAT_DIR = os.path.join(PLANT_HOME, "quadrat/images")
+    SPECIES_MAP_FILE = os.path.join(PLANT_HOME, "species_map.csv")
+    CLASS_LIST_DIR = os.path.join(PLANT_HOME, "images_max_side_800") 
+    FINE_TUNED_MODEL_PATH = os.path.join(PLANT_HOME, "lucas/models/final_lora_classifier_model.pth")
+
+    GRID_SIZE = tuple(args.grid_size)
+    IMAGE_SIZE = 518
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    NUM_CLASSES = 7806 
+    SINGLE_PLANT_MODE = args.single_plant_mode 
+
+
+    class_ids = load_class_names(CLASS_LIST_DIR)
+    species_map = load_species_map(SPECIES_MAP_FILE)
+    model = load_model(DEVICE, len(class_ids))
+    visualize_gradcam(IMAGE_PATH, model, class_ids, species_map, DEVICE)
+
 if __name__ == "__main__":
-    classes = load_class_names(CLASS_LIST_DIR)
-    model = load_model(DEVICE, len(classes))
-    visualize_gradcam(IMAGE_PATH, model, classes, DEVICE)
+    main()

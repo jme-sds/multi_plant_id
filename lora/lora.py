@@ -15,36 +15,12 @@ import random
 import glob
 import csv
 from collections import defaultdict
+import argparse
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-# Update these paths to your actual dataset locations
-PLANT_HOME = "/scratch/jme3qd/data/plantclef2025" # Base directory for models
-LUCAS_PATH = os.path.join(PLANT_HOME, "lucas/images") # Folder containing unlabelled .jpg images
-PLANTCLEF_PATH = os.path.join(PLANT_HOME, "images_max_side_800") # Folder with subfolders for each species
-TEST_IMAGES_PATH = os.path.join(PLANT_HOME,"quadrat/images") # NEW: Folder containing test quadrat images
-LORA_PATH = os.path.join(PLANT_HOME, "lucas/lora_lucas_ssl_weights")
-MODEL_PATH = os.path.join(PLANT_HOME, "lucas/models/final_fine_tuned_model.pth")
-MODEL_CHECKPOINT = "timm/vit_base_patch14_reg4_dinov2.lvd142m" # Updated to timm model
-#BATCH_SIZE = 32      # Reduced batch size to prevent OOM with larger images
-IMAGE_SIZE = 518    # Updated to 518 to match DINOv2 native resolution
-SSL_EPOCHS = 50      # Short for demo; increase for real training
-SFT_EPOCHS = 5
-LEARNING_RATE = 1e-4
-MAX_SAMPLES = 25000  # <--- NEW: Limit dataset size for debugging. Set to None for full run.
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# TRAINING HYPERPARAMETERS
-BATCH_SIZE = 128     # Total batch size (will be split across GPUs) -> Try 128 if you have 4 GPUs
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-NUM_GPUS = torch.cuda.device_count()
-
-print(f"Running on device: {DEVICE}")
-print(f"Number of GPUs available: {NUM_GPUS}")
-if NUM_GPUS > 1:
-    print("Multi-GPU DataParallel Mode Enabled.")
+# Default to current directory if env var not set to avoid immediate crash
+PLANT_HOME = os.getenv("PLANT_HOME")
+assert PLANT_HOME is not None, "Please set home/root directory of PlantCLEF files to the environment variable PLANT_HOME."
 
 # ==========================================
 # DATASETS
@@ -86,19 +62,25 @@ class PlantClefSupervisedDataset(Dataset):
     def __init__(self, root_dir, processor, split='train', max_samples=None):
         self.root_dir = root_dir
         self.processor = processor
-        self.classes = sorted(os.listdir(root_dir))
-        self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
-        self.samples = []
-        for cls_name in self.classes:
-            cls_folder = os.path.join(root_dir, cls_name)
-            if not os.path.isdir(cls_folder): continue
-            for f in os.listdir(cls_folder):
-                if f.lower().endswith(('.jpg', '.png')):
-                    self.samples.append((os.path.join(cls_folder, f), self.class_to_idx[cls_name]))
+        if os.path.exists(root_dir):
+            self.classes = sorted(os.listdir(root_dir))
+            self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
+            self.samples = []
+            for cls_name in self.classes:
+                cls_folder = os.path.join(root_dir, cls_name)
+                if not os.path.isdir(cls_folder): continue
+                for f in os.listdir(cls_folder):
+                    if f.lower().endswith(('.jpg', '.png')):
+                        self.samples.append((os.path.join(cls_folder, f), self.class_to_idx[cls_name]))
+        else:
+            self.classes = []
+            self.samples = []
+            
         if max_samples is not None and len(self.samples) > max_samples:
             print(f"Limiting Supervised dataset to {max_samples} samples (randomly selected).")
             random.shuffle(self.samples) 
             self.samples = self.samples[:max_samples]
+            
         if split == 'train':
             self.transform = transforms.Compose([
                 transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
@@ -468,30 +450,67 @@ def run_inference_and_submission(model, test_loader, class_names, output_filenam
     final_preds = {k: sorted(list(v)) for k, v in quadrat_preds.items()}
     write_submission(final_preds, output_filename)
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="PlantCLEF Training Pipeline")
+    parser.add_argument("--ssl_epochs", type=int, default=5, help="Number of SSL epochs")
+    parser.add_argument("--sft_epochs", type=int, default=15, help="Number of Supervised Fine-Tuning epochs")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--batch_size_per_gpu", type=int, default=128, help="Batch size per GPU, 64 for A6000, 128 for A100 80gb")
+    parser.add_argument("--max_samples", type=int, default=None, help="Max samples for datasets (debug)")
+    parser.add_argument("--lora_path", type=str, default="lora_lucas_ssl_weights", help="Name of LoRA weights folder")
+    parser.add_argument("--grid_size", type=int, nargs=2, default=(3, 4), help="Grid size for inference")
+    parser.add_argument("--lora_save_path", type=str, default="final_lora_classifier", help="Name of LoRA weights folder")
+    return parser
+
 def main():
+    args = parse_args().parse_args()
+
+    # --- SETUP VARS ---
+    # Construct paths dynamically
+    LUCAS_PATH = os.path.join(PLANT_HOME, "lucas/images") 
+    PLANTCLEF_PATH = os.path.join(PLANT_HOME, "images_max_side_800")
+    TEST_IMAGES_PATH = os.path.join(PLANT_HOME,"quadrat/images")
+    
+    # LORA_PATH is the FOLDER where weights are saved/loaded from
+    LORA_PATH = os.path.join(PLANT_HOME, "lucas/", args.lora_path)
+    
+    # FINAL MODEL is the FILE where the classifier + adapters are saved
+    MODEL_PATH = os.path.join(PLANT_HOME, "lucas/models/", args.lora_save_path,"_model.pth")
+    
+    global MODEL_CHECKPOINT, IMAGE_SIZE, SSL_EPOCHS, SFT_EPOCHS, LEARNING_RATE, GRID_SIZE, MAX_SAMPLES, DEVICE, NUM_GPUS, NUM_CPUS, BATCH_SIZE, NUM_WORKERS
+    
+    MODEL_CHECKPOINT = "timm/vit_base_patch14_reg4_dinov2.lvd142m"
+    IMAGE_SIZE = 518    
+    SSL_EPOCHS = args.ssl_epochs     
+    SFT_EPOCHS = args.sft_epochs
+    LEARNING_RATE = args.learning_rate
+    GRID_SIZE = tuple(args.grid_size)
+    MAX_SAMPLES = args.max_samples
+    
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    NUM_GPUS = torch.cuda.device_count()
+    NUM_CPUS = os.cpu_count()
+    BATCH_SIZE = args.batch_size_per_gpu * NUM_GPUS
+    NUM_WORKERS = min(16, NUM_CPUS) # Cap workers
+
+    print(f"Running on device: {DEVICE}")
+    print(f"Number of GPUs available: {NUM_GPUS}")
+    if NUM_GPUS > 1:
+        print("Multi-GPU DataParallel Mode Enabled.")
+
+    # --- LOAD DATASETS ---
     try:
         processor = AutoImageProcessor.from_pretrained("facebook/dinov2-base")
     except:
         print("Could not load HF processor, using default.")
         processor = None
-    
-    # Setup Dummies if needed (same as before)
-    if not os.path.exists(LUCAS_PATH) or not os.path.exists(PLANTCLEF_PATH):
-        print("Dataset paths not found. Creating dummy folders...")
-        os.makedirs(LUCAS_PATH, exist_ok=True)
-        os.makedirs(os.path.join(PLANTCLEF_PATH, "species_a"), exist_ok=True)
-        os.makedirs(os.path.join(PLANTCLEF_PATH, "species_b"), exist_ok=True)
-        os.makedirs(TEST_IMAGES_PATH, exist_ok=True)
-        Image.new('RGB', (IMAGE_SIZE, IMAGE_SIZE)).save(os.path.join(LUCAS_PATH, "dummy1.jpg"))
-        Image.new('RGB', (IMAGE_SIZE, IMAGE_SIZE)).save(os.path.join(PLANTCLEF_PATH, "species_a", "dummy2.jpg"))
-        Image.new('RGB', (IMAGE_SIZE, IMAGE_SIZE)).save(os.path.join(PLANTCLEF_PATH, "species_b", "dummy3.jpg"))
-        Image.new('RGB', (1500, 1500)).save(os.path.join(TEST_IMAGES_PATH, "test_quadrat_1.jpg"))
 
     lucas_ds = LucasSSLDataset(LUCAS_PATH, processor, max_samples=MAX_SAMPLES)
-    lucas_loader = DataLoader(lucas_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    # Only create loader if we need SSL
+    lucas_loader = DataLoader(lucas_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
     
     plant_ds = PlantClefSupervisedDataset(PLANTCLEF_PATH, processor, split='train', max_samples=MAX_SAMPLES)
-    plant_loader = DataLoader(plant_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    plant_loader = DataLoader(plant_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
     num_classes = len(plant_ds.classes)
     class_names = plant_ds.classes
     print(f"Found {num_classes} classes.")
@@ -500,93 +519,44 @@ def main():
         transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
         transforms.ToTensor(),
     ])
-    test_ds = QuadratTilingDataset_Inference(TEST_IMAGES_PATH, grid_size=(3, 3), transform=inference_transform)
+    test_ds = QuadratTilingDataset_Inference(TEST_IMAGES_PATH, grid_size=GRID_SIZE, transform=inference_transform)
+    test_loader = None
     if len(test_ds) > 0:
-        test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
-    else:
-        test_loader = None
+        test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
 
-    # MODEL A: LoRA + SSL
+    # --- MODEL A: LoRA + SSL + SFT ---
     print("\n=== Model A: LoRA Pre-trained on LUCAS ===")
+    
+    # 1. Initialize Base Model + Random LoRA Adapters
     model_lora = get_base_model_with_lora()
-    
-    
+
+    # 2. Check for existing SSL weights (Adapters only)
     if os.path.exists(LORA_PATH):
-        print(f"Loading LoRA weights from {LORA_PATH}...")
-        model_lora = PeftModel.from_pretrained(model_lora, LORA_PATH)
+        print(f"Found existing SSL adapters at {LORA_PATH}")
+        print("Loading adapters into backbone...")
+        # Load adapters into the PEFT model
+        model_lora.load_adapter(LORA_PATH, adapter_name="default")
     else:
-    # Train SSL
+        print("No existing SSL adapters found. Starting SimCLR training...")
+        # Train SSL (updates adapters)
         model_lora = train_ssl(model_lora, lucas_loader, SSL_EPOCHS)
         
-        # Save Weights (Must handle DataParallel unwrapping if needed, but train_ssl returns unwrapped)
-        # If using PeftModel, save_pretrained saves adapters
+        # Save Adapters (Folder)
+        print(f"Saving SSL adapters to {LORA_PATH}")
         model_lora.save_pretrained(LORA_PATH)
     
-    # Train Supervised
+    # 3. Supervised Fine-Tuning (SFT)
+    # train_supervised will wrap the model in LoRAClassifier (adding the head)
+    # and train both the head and the adapters (or just head, depending on config)
     final_model_a = train_supervised(model_lora, plant_loader, num_classes, SFT_EPOCHS)
     
-    # Save Final Model (State Dict)
+    # 4. Save Final Full Model (State Dict of Classifier + Adapters)
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
     torch.save(final_model_a.state_dict(), MODEL_PATH)
+    print(f"Saved final fine-tuned model to {MODEL_PATH}")
     
+    # 5. Inference
     if test_loader:
-        run_inference_and_submission(final_model_a, test_loader, class_names, "submission_model_a_lora.csv")
-    
-    # MODEL B: Baseline
-    print("\n=== Model B: Standard ViT Baseline (Frozen Backbone) ===")
-    base_vit = timm.create_model(MODEL_CHECKPOINT, pretrained=True)
-    base_vit.to(DEVICE)
-    for param in base_vit.parameters(): param.requires_grad = False
-        
-    class SimpleClassifier(nn.Module):
-        def __init__(self, backbone, n_classes):
-            super().__init__()
-            self.backbone = backbone
-            self.classifier = nn.Linear(backbone.embed_dim, n_classes)
-        def forward(self, x, labels=None):
-            features = self.backbone.forward_features(x)
-            cls_token = features[:, 0]
-            logits = self.classifier(cls_token)
-            if labels is not None:
-                loss = nn.CrossEntropyLoss()(logits, labels)
-                return loss, logits
-            return logits
-
-    model_b = SimpleClassifier(base_vit, num_classes).to(DEVICE)
-    
-    # Run Baseline Training
-    # Re-use train_supervised logic but pass model_b
-    # Note: train_supervised expects a model that behaves like LoRAClassifier.
-    # SimpleClassifier is compatible.
-    
-    # Wrap in DP manually here for the baseline loop if calling train_supervised logic manually 
-    # OR create a dedicated loop. 
-    # To reuse train_supervised, we can just pass model_b IF we wrap it in a class with .base_model or handle it.
-    # But wait, train_supervised wraps input in LoRAClassifier. 
-    # We should just copy the loop for simplicity or make train_supervised generic.
-    # Let's just run a quick loop here for Baseline to keep it clean.
-    
-    if NUM_GPUS > 1:
-        model_b = nn.DataParallel(model_b)
-        
-    optimizer_b = optim.AdamW(model_b.parameters(), lr=LEARNING_RATE)
-    model_b.train()
-    for epoch in range(SFT_EPOCHS):
-        pbar = tqdm(plant_loader, desc=f"Baseline Epoch {epoch+1}/{SFT_EPOCHS}")
-        for batch in pbar:
-            imgs = batch['pixel_values'].to(DEVICE)
-            labels = batch['labels'].to(DEVICE)
-            optimizer_b.zero_grad()
-            results = model_b(imgs, labels)
-            if isinstance(results, tuple): 
-                loss = results[0].mean()
-            else: 
-                loss = results.mean() # Should not happen based on SimpleClassifier
-            loss.backward()
-            optimizer_b.step()
-            pbar.set_postfix({'loss': loss.item()})
-
-    if test_loader:
-        run_inference_and_submission(model_b, test_loader, class_names, "submission_model_b_baseline.csv")
-
+        run_inference_and_submission(final_model_a, test_loader, class_names, "submission_model_lora_"+str(args.grid_size[0])+"x"+str(args.grid_size[1])+"_.csv")
 if __name__ == "__main__":
     main()
