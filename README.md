@@ -66,3 +66,85 @@ def load_plantclef_model(checkpoint_path="final_fine_tuned_model.pth", device="c
 # Usage
 # model = load_plantclef_model("path/to/downloaded/final_fine_tuned_model.pth")
 ```
+
+### Environment Setup
+The scripts rely on a central environment variable `PLANT_HOME` to locate datasets and save models. You must set this before running any scripts.
+```
+export PLANT_HOME="/path/to/your/dataset/root"
+```
+#### Directory Structure
+
+Ensure your data is organized as follows within `PLANT_HOME`:
+```
+PLANT_HOME/
+├── images_max_side_800/       # Single-plant training images (folders by species_id)
+├── quadrat/images/            # Test quadrat images (.jpg)
+├── lucas/images/              # Unlabeled LUCAS pseudo-quadrats
+├── lucas/models/              # Output directory for trained models
+├── dinov2_model/              # Challenge-provided weights
+│   └── model_best.pth.tar
+└── species_mapping.csv        # (Optional) Map of species_id -> species_name
+```
+
+### Training
+#### Train Baseline (Linear Probe)
+
+This script trains a simple classification head on top of the frozen DINOv2 backbone. It is fast and memory-efficient, serving as a robust baseline.
+
+```
+python train_classifier.py
+```
+- Output: Saves baseline_fine_tuned.pth to the current directory.
+
+#### Train LoRA (SSL + Supervised)
+
+This runs the complete domain adaptation pipeline:
+
+Stage 1 (SSL): SimCLR contrastive learning on unlabeled LUCAS data (default 50 epochs).
+
+Stage 2 (SFT): Supervised classification on labeled single plants (default 5 epochs).
+```
+python lora.py \
+  --ssl_epochs 50 \
+  --sft_epochs 5 \
+  --lora_path "lora_lucas_ssl_weights" \
+  --batch_size_per_gpu 32
+```
+- Output: Saves the full model (adapters + head) to `PLANT_HOME/lucas/models/final_fine_tuned_model.pth`.
+
+## Inference & Submission
+
+These scripts generate Kaggle-formatted submission files (.csv) by tiling high-resolution quadrats and pooling predictions.
+
+### Baseline Inference (Multi-Grid Pooling)
+
+Runs inference using the Baseline model across multiple grid sizes (e.g., 2x2 and 3x3) and pools the predictions via Union Voting.
+```
+python baseline_inference_dino.py \
+  --grids 2 2 3 3 \
+  --fine_tuned_path "baseline_fine_tuned.pth" \
+  --output "submission_baseline.csv"
+```
+### LoRA Inference
+
+Runs inference using the fine-tuned LoRA model on a specific grid size (e.g., 3x4).
+```
+python lora_inference.py \
+  --grid_size 3 4 \
+  --model_path "lucas/models/final_fine_tuned_model.pth"
+```
+## Visualization: Grad-CAM Heatmaps
+
+Visualize which parts of the image the model is focusing on. This script supports generating heatmaps for both the Baseline and LoRA models to compare their attention mechanisms.
+
+### Compare both Baseline and LoRA on a random test image
+```
+python gradcam.py --grid_size 3 3
+```
+
+### Visualize a specific image with the LoRA model
+```
+python gradcam.py \
+  --image_path "/path/to/specific/quadrat.jpg" \
+  --output_path "./gradcam_quadrat.jpg"
+```
