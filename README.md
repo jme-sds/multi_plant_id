@@ -28,7 +28,10 @@ We provide our best fine-tuned model (DINOv2 + LoRA) via GitHub Releases.
 ###  How to Load
 
 1. **Download the weights** from the [Releases Page]().
-2. **Install dependencies:**
+   ```bash
+   wget [https://github.com/jme-sds/multi_plant_id/releases/download/v1.0.0/baseline_fine_tuned.pth](https://github.com/jme-sds/multi_plant_id/releases/download/v1.0.0/baseline_fine_tuned.pth)
+   ```
+3. **Install dependencies:**
    ```bash
    pip install torch tqdm numpy scipy scikit-learn torchvision torchaudio matplotlib seaborn
    ```
@@ -69,3 +72,17 @@ def load_plantclef_model(checkpoint_path="final_fine_tuned_model.pth", device="c
 # Usage
 # model = load_plantclef_model("path/to/downloaded/final_fine_tuned_model.pth")
 ```
+
+Or if you prefer, you can clone this repo!
+
+```bash
+git clone [https://github.com/jme-sds/multi_plant_id](https://github.com/jme-sds/multi_plant_id)
+```
+
+And install the dependecies.
+
+```bash
+pip install -r requirements.txt
+```
+
+
